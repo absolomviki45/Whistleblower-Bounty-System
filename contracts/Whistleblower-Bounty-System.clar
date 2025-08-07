@@ -7,6 +7,12 @@
 (define-constant ERR_INVALID_STATUS (err u105))
 (define-constant ERR_ALREADY_VALIDATED (err u106))
 
+(define-data-var total-reports-submitted uint u0)
+(define-data-var total-reports-approved uint u0)
+(define-data-var total-reports-rejected uint u0)
+(define-data-var total-rewards-distributed uint u0)
+(define-data-var total-verified-whistleblowers uint u0)
+
 (define-fungible-token bounty-token)
 
 (define-data-var next-report-id uint u1)
@@ -197,4 +203,99 @@
 (begin
   (try! (ft-mint? bounty-token u10000 CONTRACT_OWNER))
   (var-set contract-balance u10000)
+)
+
+
+(define-read-only (get-system-statistics)
+  (let 
+    (
+      (total-submitted (var-get total-reports-submitted))
+      (total-approved (var-get total-reports-approved))
+      (total-rejected (var-get total-reports-rejected))
+    )
+    (ok {
+      total-reports: total-submitted,
+      approved-reports: total-approved,
+      rejected-reports: total-rejected,
+      pending-reports: (- total-submitted (+ total-approved total-rejected)),
+      approval-rate: (if (> total-submitted u0) 
+                      (/ (* total-approved u100) total-submitted) 
+                      u0),
+      total-rewards-paid: (var-get total-rewards-distributed),
+      verified-users: (var-get total-verified-whistleblowers)
+    })
+  )
+)
+
+(define-read-only (get-reporter-performance (reporter principal))
+  (let 
+    (
+      (user-reports (filter-reports-by-reporter reporter (var-get next-report-id)))
+    )
+    (ok {
+      total-submissions: (get total user-reports),
+      approved-submissions: (get approved user-reports),
+      success-rate: (if (> (get total user-reports) u0)
+                     (/ (* (get approved user-reports) u100) (get total user-reports))
+                     u0)
+    })
+  )
+)
+
+(define-read-only (get-monthly-report-trend (month uint))
+  (let 
+    (
+      (current-block stacks-block-height)
+      (blocks-per-month u4320)
+      (month-start (- current-block (* month blocks-per-month)))
+      (month-end (- current-block (* (- month u1) blocks-per-month)))
+    )
+    (ok {
+      month-identifier: month,
+      reports-in-period: (count-reports-in-range month-start month-end),
+      rewards-distributed: (calculate-period-rewards month-start month-end)
+    })
+  )
+)
+
+(define-private (filter-reports-by-reporter (reporter principal) (max-id uint))
+  (fold check-reporter-report (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) {total: u0, approved: u0, reporter: reporter})
+)
+
+(define-private (check-reporter-report (report-id uint) (acc {total: uint, approved: uint, reporter: principal}))
+  (match (map-get? reports report-id)
+    report (if (is-eq (get reporter report) (get reporter acc))
+             (if (is-eq (get status report) "approved")
+               {total: (+ (get total acc) u1), approved: (+ (get approved acc) u1), reporter: (get reporter acc)}
+               {total: (+ (get total acc) u1), approved: (get approved acc), reporter: (get reporter acc)})
+             acc)
+    acc
+  )
+)
+
+(define-private (count-reports-in-range (start-block uint) (end-block uint))
+  (get count (fold count-reports-in-period (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) {count: u0, start: start-block, end: end-block}))
+)
+
+(define-private (count-reports-in-period (report-id uint) (data {count: uint, start: uint, end: uint}))
+  (match (map-get? reports report-id)
+    report (if (and (>= (get submission-block report) (get start data)) 
+                    (<= (get submission-block report) (get end data)))
+             {count: (+ (get count data) u1), start: (get start data), end: (get end data)}
+             data)
+    data)
+)
+
+(define-private (calculate-period-rewards (start-block uint) (end-block uint))
+  (get total (fold sum-period-rewards-data (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) {total: u0, start: start-block, end: end-block}))
+)
+
+(define-private (sum-period-rewards-data (report-id uint) (data {total: uint, start: uint, end: uint}))
+  (match (map-get? reports report-id)
+    report (if (and (>= (get submission-block report) (get start data)) 
+                    (<= (get submission-block report) (get end data))
+                    (get reward-paid report))
+             {total: (+ (get total data) (var-get reward-amount)), start: (get start data), end: (get end data)}
+             data)
+    data)
 )

@@ -7,11 +7,16 @@
 (define-constant ERR_INVALID_STATUS (err u105))
 (define-constant ERR_ALREADY_VALIDATED (err u106))
 
+
 (define-data-var total-reports-submitted uint u0)
 (define-data-var total-reports-approved uint u0)
 (define-data-var total-reports-rejected uint u0)
 (define-data-var total-rewards-distributed uint u0)
 (define-data-var total-verified-whistleblowers uint u0)
+
+(define-data-var reputation-decay-factor uint u95)
+(define-data-var max-reputation-score uint u1000)
+(define-data-var min-reputation-score uint u100)
 
 (define-fungible-token bounty-token)
 
@@ -298,4 +303,100 @@
              {total: (+ (get total data) (var-get reward-amount)), start: (get start data), end: (get end data)}
              data)
     data)
+)
+
+
+(define-map whistleblower-reputation
+  principal
+  {
+    score: uint,
+    total-submissions: uint,
+    approved-submissions: uint,
+    total-votes: uint,
+    last-activity-block: uint
+  }
+)
+
+(define-read-only (get-reputation-score (user principal))
+  (match (map-get? whistleblower-reputation user)
+    reputation-data (ok (get score reputation-data))
+    (ok u0)
+  )
+)
+
+(define-read-only (get-full-reputation-data (user principal))
+  (match (map-get? whistleblower-reputation user)
+    reputation-data (ok reputation-data)
+    (ok {score: u0, total-submissions: u0, approved-submissions: u0, total-votes: u0, last-activity-block: u0})
+  )
+)
+
+(define-read-only (calculate-reputation-score (submissions uint) (approved uint) (votes uint))
+  (let
+    (
+      (base-score u500)
+      (accuracy-bonus (if (> submissions u0) 
+                        (/ (* approved u300) submissions) 
+                        u0))
+      (participation-bonus (if (> (* votes u10) u200) u200 (* votes u10)))
+      (calculated-score (+ base-score (+ accuracy-bonus participation-bonus)))
+    )
+    (if (> calculated-score (var-get max-reputation-score)) 
+        (var-get max-reputation-score) 
+        calculated-score)
+  )
+)
+
+(define-private (update-reputation-on-validation (reporter principal) (approved bool))
+  (let
+    (
+      (current-data (unwrap-panic (get-full-reputation-data reporter)))
+      (new-submissions (+ (get total-submissions current-data) u1))
+      (new-approved (if approved 
+                      (+ (get approved-submissions current-data) u1)
+                      (get approved-submissions current-data)))
+      (current-votes (get total-votes current-data))
+      (new-score (calculate-reputation-score new-submissions new-approved current-votes))
+    )
+    (map-set whistleblower-reputation reporter {
+      score: new-score,
+      total-submissions: new-submissions,
+      approved-submissions: new-approved,
+      total-votes: current-votes,
+      last-activity-block: stacks-block-height
+    })
+  )
+)
+
+(define-private (update-reputation-on-vote (voter principal))
+  (let
+    (
+      (current-data (unwrap-panic (get-full-reputation-data voter)))
+      (new-votes (+ (get total-votes current-data) u1))
+      (current-submissions (get total-submissions current-data))
+      (current-approved (get approved-submissions current-data))
+      (new-score (calculate-reputation-score current-submissions current-approved new-votes))
+    )
+    (map-set whistleblower-reputation voter {
+      score: new-score,
+      total-submissions: current-submissions,
+      approved-submissions: current-approved,
+      total-votes: new-votes,
+      last-activity-block: stacks-block-height
+    })
+  )
+)
+
+(define-public (initialize-reputation (user principal))
+  (begin
+    (asserts! (is-verified-whistleblower user) ERR_UNAUTHORIZED)
+    (asserts! (is-none (map-get? whistleblower-reputation user)) ERR_ALREADY_VERIFIED)
+    (ok (map-set whistleblower-reputation user {
+      score: u500,
+      total-submissions: u0,
+      approved-submissions: u0,
+      total-votes: u0,
+      last-activity-block: stacks-block-height
+    }))
+  )
 )

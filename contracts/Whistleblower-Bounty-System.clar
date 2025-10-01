@@ -7,6 +7,10 @@
 (define-constant ERR_INVALID_STATUS (err u105))
 (define-constant ERR_ALREADY_VALIDATED (err u106))
 
+(define-constant ERR_INVALID_ESCALATION (err u107))
+(define-constant ERR_WINDOW_NOT_FOUND (err u108))
+
+(define-data-var next-window-id uint u1)
 
 (define-data-var total-reports-submitted uint u0)
 (define-data-var total-reports-approved uint u0)
@@ -398,5 +402,89 @@
       total-votes: u0,
       last-activity-block: stacks-block-height
     }))
+  )
+)
+
+(define-map escalation-windows
+  uint
+  {
+    start-block: uint,
+    end-block: uint,
+    multiplier-percent: uint,
+    active: bool,
+    created-at: uint
+  }
+)
+
+(define-read-only (get-escalation-window (window-id uint))
+  (map-get? escalation-windows window-id)
+)
+
+(define-read-only (calculate-escalated-reward (base-reward uint) (submission-block uint))
+  (let
+    (
+      (window-search (find-active-window submission-block (var-get next-window-id)))
+      (applicable-multiplier (get result window-search))
+    )
+    (match applicable-multiplier
+      window-data (ok (/ (* base-reward (get multiplier-percent window-data)) u100))
+      (ok base-reward)
+    )
+  )
+)
+
+(define-private (find-active-window (target-height uint) (max-window-id uint))
+  (fold check-window-match 
+    (list u1 u2 u3 u4 u5) 
+    {target-block: target-height, result: none}
+  )
+)
+
+(define-private (check-window-match 
+  (window-id uint) 
+  (acc {target-block: uint, result: (optional {multiplier-percent: uint})})
+)
+  (if (is-some (get result acc))
+    acc
+    (match (map-get? escalation-windows window-id)
+      window (if (and (get active window)
+                      (>= (get target-block acc) (get start-block window))
+                      (<= (get target-block acc) (get end-block window)))
+               {target-block: (get target-block acc), 
+                result: (some {multiplier-percent: (get multiplier-percent window)})}
+               acc)
+      acc
+    )
+  )
+)
+
+(define-public (create-escalation-window (start-block uint) (end-block uint) (multiplier-percent uint))
+  (let
+    (
+      (window-id (var-get next-window-id))
+      (current-block stacks-block-height)
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (< start-block end-block) ERR_INVALID_ESCALATION)
+    (asserts! (and (>= multiplier-percent u100) (<= multiplier-percent u300)) ERR_INVALID_ESCALATION)
+    (map-set escalation-windows window-id {
+      start-block: start-block,
+      end-block: end-block,
+      multiplier-percent: multiplier-percent,
+      active: true,
+      created-at: current-block
+    })
+    (var-set next-window-id (+ window-id u1))
+    (ok window-id)
+  )
+)
+
+(define-public (toggle-escalation-window (window-id uint) (active-status bool))
+  (let
+    (
+      (window (unwrap! (map-get? escalation-windows window-id) ERR_WINDOW_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (ok (map-set escalation-windows window-id (merge window {active: active-status})))
   )
 )

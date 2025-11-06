@@ -10,6 +10,13 @@
 (define-constant ERR_INVALID_ESCALATION (err u107))
 (define-constant ERR_WINDOW_NOT_FOUND (err u108))
 
+(define-constant ERR_APPEAL_WINDOW_CLOSED (err u109))
+(define-constant ERR_CANNOT_APPEAL_STATUS (err u110))
+(define-constant ERR_ALREADY_APPEALED (err u111))
+
+(define-data-var appeal-window-blocks uint u144)
+(define-data-var appeal-fee uint u100)
+
 (define-data-var next-window-id uint u1)
 
 (define-data-var total-reports-submitted uint u0)
@@ -486,5 +493,83 @@
     )
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
     (ok (map-set escalation-windows window-id (merge window {active: active-status})))
+  )
+)
+
+
+(define-map report-appeals
+  uint
+  {
+    appealed-by: principal,
+    appeal-block: uint,
+    appeal-reason-hash: (buff 32),
+    appeal-status: (string-ascii 10),
+    appeal-decision-block: (optional uint),
+    fee-refunded: bool
+  }
+)
+
+(define-read-only (get-appeal-info (report-id uint))
+  (map-get? report-appeals report-id)
+)
+
+(define-read-only (is-appeal-window-open (submission-block uint))
+  (let
+    (
+      (current-block stacks-block-height)
+      (window-duration (var-get appeal-window-blocks))
+      (deadline (+ submission-block window-duration))
+    )
+    (<= current-block deadline)
+  )
+)
+
+(define-public (submit-appeal (report-id uint) (reason-hash (buff 32)))
+  (let
+    (
+      (report (unwrap! (map-get? reports report-id) ERR_REPORT_NOT_FOUND))
+      (current-block stacks-block-height)
+      (fee (var-get appeal-fee))
+    )
+    (asserts! (is-eq tx-sender (get reporter report)) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status report) "rejected") ERR_CANNOT_APPEAL_STATUS)
+    (asserts! (is-none (map-get? report-appeals report-id)) ERR_ALREADY_APPEALED)
+    (asserts! (is-appeal-window-open (get submission-block report)) ERR_APPEAL_WINDOW_CLOSED)
+    (asserts! (>= (ft-get-balance bounty-token tx-sender) fee) ERR_INSUFFICIENT_FUNDS)
+    (try! (ft-transfer? bounty-token fee tx-sender CONTRACT_OWNER))
+    (map-set report-appeals report-id {
+      appealed-by: tx-sender,
+      appeal-block: current-block,
+      appeal-reason-hash: reason-hash,
+      appeal-status: "pending",
+      appeal-decision-block: none,
+      fee-refunded: false
+    })
+    (ok true)
+  )
+)
+
+(define-public (process-appeal (report-id uint) (approve-appeal bool))
+  (let
+    (
+      (report (unwrap! (map-get? reports report-id) ERR_REPORT_NOT_FOUND))
+      (appeal (unwrap! (map-get? report-appeals report-id) ERR_REPORT_NOT_FOUND))
+      (current-block stacks-block-height)
+      (fee (var-get appeal-fee))
+      (appellant (get appealed-by appeal))
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get appeal-status appeal) "pending") ERR_ALREADY_VALIDATED)
+    (map-set report-appeals report-id (merge appeal {
+      appeal-status: (if approve-appeal "accepted" "denied"),
+      appeal-decision-block: (some current-block)
+    }))
+    (if approve-appeal
+      (begin
+        (map-set reports report-id (merge report {status: "approved"}))
+        (try! (ft-transfer? bounty-token fee CONTRACT_OWNER appellant))
+        (map-set report-appeals report-id (merge (unwrap-panic (map-get? report-appeals report-id)) {fee-refunded: true}))
+        (distribute-reward report-id))
+      (ok false))
   )
 )
